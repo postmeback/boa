@@ -10,18 +10,20 @@ use super::rootable::Rootable;
 
 /// A key-value pair where the value becomes unaccesible when the key is garbage collected.
 ///
-/// See Racket's explanation on [**ephemerons**][eph] for a brief overview or read Barry Hayes'
-/// [_Ephemerons_: a new finalization mechanism][acm].
+/// You can read more about ephemerons on:
+/// - Racket's page about [**ephemerons**][eph], which gives a brief overview.
+/// - Barry Hayes' paper ["_Ephemerons_: a new finalization mechanism"][acm] which explains the topic
+/// in full detail.
 ///
 ///
 /// [eph]: https://docs.racket-lang.org/reference/ephemerons.html
 /// [acm]: https://dl.acm.org/doi/10.1145/263700.263733
 #[derive(Debug)]
-pub struct Ephemeron<K: Trace + ?Sized + 'static, V: Trace + 'static> {
+pub struct Ephemeron<K: Trace + 'static, V: Trace + 'static> {
     inner_ptr: Cell<Rootable<EphemeronBox<K, V>>>,
 }
 
-impl<K: Trace + ?Sized, V: Trace + Clone> Ephemeron<K, V> {
+impl<K: Trace, V: Trace + Clone> Ephemeron<K, V> {
     /// Gets the stored value of this `Ephemeron`, or `None` if the key was already garbage collected.
     ///
     /// This needs to return a clone of the value because holding a reference to it between
@@ -40,7 +42,7 @@ impl<K: Trace + ?Sized, V: Trace + Clone> Ephemeron<K, V> {
     }
 }
 
-impl<K: Trace + ?Sized, V: Trace> Ephemeron<K, V> {
+impl<K: Trace, V: Trace> Ephemeron<K, V> {
     /// Creates a new `Ephemeron`.
     pub fn new(key: &Gc<K>, value: V) -> Self {
         // SAFETY: `value` comes from the stack and should be rooted, meaning unrooting
@@ -106,11 +108,11 @@ impl<K: Trace + ?Sized, V: Trace> Ephemeron<K, V> {
     }
 }
 
-impl<K: Trace + ?Sized, V: Trace> Finalize for Ephemeron<K, V> {}
+impl<K: Trace, V: Trace> Finalize for Ephemeron<K, V> {}
 
 // SAFETY: `Ephemeron`s trace implementation only marks its inner box because we want to stop
 // tracing through weakly held pointers.
-unsafe impl<K: Trace + ?Sized, V: Trace> Trace for Ephemeron<K, V> {
+unsafe impl<K: Trace, V: Trace> Trace for Ephemeron<K, V> {
     unsafe fn trace(&self) {
         // SAFETY: We need to mark the inner box of the `Ephemeron` since it is reachable
         // from a root and this means it cannot be dropped.
@@ -142,7 +144,7 @@ unsafe impl<K: Trace + ?Sized, V: Trace> Trace for Ephemeron<K, V> {
     }
 }
 
-impl<K: Trace + ?Sized, V: Trace> Clone for Ephemeron<K, V> {
+impl<K: Trace, V: Trace> Clone for Ephemeron<K, V> {
     fn clone(&self) -> Self {
         let ptr = self.inner_ptr();
         // SAFETY: since an `Ephemeron` is always valid, its `inner_ptr` must also be always a valid
@@ -155,7 +157,7 @@ impl<K: Trace + ?Sized, V: Trace> Clone for Ephemeron<K, V> {
     }
 }
 
-impl<K: Trace + ?Sized, V: Trace> Drop for Ephemeron<K, V> {
+impl<K: Trace, V: Trace> Drop for Ephemeron<K, V> {
     fn drop(&mut self) {
         // If this pointer was a root, we should unroot it.
         if self.is_rooted() {
