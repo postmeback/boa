@@ -84,7 +84,7 @@ impl<K: Trace + ?Sized, V: Trace> Ephemeron<K, V> {
         self.inner_ptr.get().as_ptr()
     }
 
-    fn inner(&self) -> &EphemeronBox<K, V> {
+    pub(crate) fn inner(&self) -> &EphemeronBox<K, V> {
         // SAFETY: Please see Gc::inner_ptr()
         unsafe { self.inner_ptr().as_ref() }
     }
