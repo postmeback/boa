@@ -3,9 +3,51 @@
 //! [`NativeFunction`] is the main type of this module, providing APIs to create native callables
 //! from native Rust functions and closures.
 
-use boa_gc::{custom_trace, Finalize, Gc, Trace};
+use std::pin::Pin;
 
-use crate::{object::JsPromise, Context, JsResult, JsValue};
+use boa_gc::{custom_trace, Finalize, Gc, Trace};
+use next_gen::prelude::{Generator, GeneratorState};
+use thin_vec::ThinVec;
+
+use crate::{object::JsPromise, Context, JsObject, JsResult, JsValue};
+
+///
+#[allow(missing_debug_implementations)]
+pub struct CallContext {
+    pub(crate) f: JsObject,
+    pub(crate) this: JsValue,
+    pub(crate) args: ThinVec<JsValue>,
+}
+
+///
+pub type JsCoroutine =
+    Pin<Box<dyn Generator<JsResult<JsValue>, Yield = CallContext, Return = JsResult<JsValue>>>>;
+
+///
+#[allow(missing_debug_implementations)]
+pub enum CallResult<T> {
+    ///
+    Value(T),
+    ///
+    Coroutine(JsCoroutine),
+    ///
+    DirectCall(CallContext),
+}
+
+///
+pub type JsReturn = CallResult<JsValue>;
+
+impl From<JsValue> for JsReturn {
+    fn from(value: JsValue) -> Self {
+        Self::Value(value)
+    }
+}
+
+impl<T> From<JsCoroutine> for CallResult<T> {
+    fn from(value: JsCoroutine) -> Self {
+        Self::Coroutine(value)
+    }
+}
 
 /// The required signature for all native built-in function pointers.
 ///
@@ -17,6 +59,9 @@ use crate::{object::JsPromise, Context, JsResult, JsValue};
 ///
 /// - The last argument is the engine [`Context`].
 pub type NativeFunctionPointer = fn(&JsValue, &[JsValue], &mut Context<'_>) -> JsResult<JsValue>;
+
+pub(crate) type NativeFunctionPointer2 =
+    fn(&JsValue, &[JsValue], &mut Context<'_>) -> JsResult<JsReturn>;
 
 trait TraceableClosure: Trace {
     fn call(
@@ -77,6 +122,7 @@ pub struct NativeFunction {
 #[derive(Clone)]
 enum Inner {
     PointerFn(NativeFunctionPointer),
+    PointerFn2(NativeFunctionPointer2),
     Closure(Gc<dyn TraceableClosure>),
 }
 
@@ -110,6 +156,12 @@ impl NativeFunction {
     pub fn from_fn_ptr(function: NativeFunctionPointer) -> Self {
         Self {
             inner: Inner::PointerFn(function),
+        }
+    }
+
+    pub(crate) fn from_fn_ptr_2(function: NativeFunctionPointer2) -> Self {
+        Self {
+            inner: Inner::PointerFn2(function),
         }
     }
 
@@ -283,9 +335,35 @@ impl NativeFunction {
         args: &[JsValue],
         context: &mut Context<'_>,
     ) -> JsResult<JsValue> {
+        let mut coroutine = match self.inner {
+            Inner::PointerFn(f) => return f(this, args, context),
+            Inner::Closure(ref c) => return c.call(this, args, context),
+            Inner::PointerFn2(f) => match f(this, args, context)? {
+                CallResult::Value(val) => return Ok(val),
+                CallResult::Coroutine(co) => co,
+                CallResult::DirectCall(tc) => return tc.f.call(&tc.this, &tc.args, context),
+            },
+        };
+        let mut resume_arg = Ok(JsValue::undefined());
+        loop {
+            resume_arg = match coroutine.as_mut().resume(resume_arg) {
+                GeneratorState::Yielded(call) => call.f.call(&call.this, &call.args, context),
+                GeneratorState::Returned(result) => break result,
+            }
+        }
+    }
+
+    #[allow(unused)]
+    pub(crate) fn call2(
+        &self,
+        this: &JsValue,
+        args: &[JsValue],
+        context: &mut Context<'_>,
+    ) -> JsResult<CallResult<JsValue>> {
         match self.inner {
-            Inner::PointerFn(f) => f(this, args, context),
-            Inner::Closure(ref c) => c.call(this, args, context),
+            Inner::PointerFn(f) => f(this, args, context).map(CallResult::Value),
+            Inner::PointerFn2(f) => f(this, args, context),
+            Inner::Closure(ref c) => c.call(this, args, context).map(CallResult::Value),
         }
     }
 }

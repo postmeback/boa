@@ -7,15 +7,21 @@
 #[cfg(feature = "fuzz")]
 use crate::JsNativeError;
 use crate::{
-    builtins::async_generator::{AsyncGenerator, AsyncGeneratorState},
-    environments::{DeclarativeEnvironment, EnvironmentStack},
+    builtins::{
+        async_generator::{AsyncGenerator, AsyncGeneratorState},
+        function::{arguments::Arguments, FunctionKind, ThisMode},
+    },
+    environments::{DeclarativeEnvironment, EnvironmentStack, FunctionSlots, ThisBindingStatus},
+    native_function::{CallContext, CallResult, JsCoroutine},
+    realm::Realm,
     script::Script,
     vm::code_block::Readable,
-    Context, JsError, JsObject, JsResult, JsValue, Module,
+    Context, JsError, JsNativeError, JsObject, JsResult, JsValue, Module,
 };
 
 use boa_gc::{custom_trace, Finalize, Gc, Trace};
 use boa_profiler::Profiler;
+use next_gen::prelude::GeneratorState;
 use std::mem::size_of;
 
 #[cfg(feature = "trace")]
@@ -48,6 +54,34 @@ pub(crate) use {
 
 #[cfg(test)]
 mod tests;
+
+struct CallerState {
+    realm: Realm,
+    active_function: Option<JsObject>,
+    environments: EnvironmentStack,
+    stack: Vec<JsValue>,
+    active_runnable: Option<ActiveRunnable>,
+}
+enum Caller {
+    Coroutine(JsCoroutine),
+    Caller(CallerState),
+}
+
+impl Caller {
+    fn as_coroutine_mut(&mut self) -> Option<&mut JsCoroutine> {
+        match self {
+            Caller::Coroutine(co) => Some(co),
+            Caller::Caller(_) => None,
+        }
+    }
+
+    fn into_state(self) -> Option<CallerState> {
+        match self {
+            Caller::Coroutine(_) => None,
+            Caller::Caller(caller) => Some(caller),
+        }
+    }
+}
 
 /// Virtual Machine.
 #[derive(Debug)]
@@ -140,6 +174,11 @@ impl Vm {
         self.frames.last_mut().expect("no frame found")
     }
 
+    // TODO: Rename `frame` to `frame_expect` and make this `frame`.
+    pub(crate) fn frame_opt(&self) -> Option<&CallFrame> {
+        self.frames.last()
+    }
+
     pub(crate) fn push_frame(&mut self, frame: CallFrame) {
         self.frames.push(frame);
     }
@@ -172,6 +211,23 @@ impl Context<'_> {
         let _timer = Profiler::global().start_event(opcode.as_instruction_str(), "vm");
 
         opcode.execute(self)
+    }
+
+    fn execute_instruction2(&mut self) -> JsResult<CallResult<CompletionType>> {
+        let opcode: Opcode = {
+            let _timer = Profiler::global().start_event("Opcode retrieval", "vm");
+
+            let frame = self.vm.frame_mut();
+
+            let pc = frame.pc;
+            let opcode = Opcode::from(frame.code_block.bytecode[pc as usize]);
+            frame.pc += 1;
+            opcode
+        };
+
+        let _timer = Profiler::global().start_event(opcode.as_instruction_str(), "vm");
+
+        opcode.execute2(self)
     }
 
     pub(crate) fn run(&mut self) -> CompletionRecord {
@@ -447,4 +503,398 @@ impl Context<'_> {
         }
         CompletionRecord::Normal(execution_result)
     }
+
+    pub(crate) fn run2(&mut self) -> JsResult<JsValue> {
+        #[cfg(feature = "trace")]
+        const COLUMN_WIDTH: usize = 26;
+        #[cfg(feature = "trace")]
+        const TIME_COLUMN_WIDTH: usize = COLUMN_WIDTH / 2;
+        #[cfg(feature = "trace")]
+        const OPCODE_COLUMN_WIDTH: usize = COLUMN_WIDTH;
+        #[cfg(feature = "trace")]
+        const OPERAND_COLUMN_WIDTH: usize = COLUMN_WIDTH;
+        #[cfg(feature = "trace")]
+        const NUMBER_OF_COLUMNS: usize = 4;
+
+        let _timer = Profiler::global().start_event("run2", "vm");
+
+        #[cfg(feature = "trace")]
+        if self.vm.trace {
+            let msg = if self.vm.frames.last().is_some() {
+                " Call Frame "
+            } else {
+                " VM Start "
+            };
+
+            println!(
+                "{}\n",
+                self.vm
+                    .frame()
+                    .code_block
+                    .to_interned_string(self.interner())
+            );
+            println!(
+                "{msg:-^width$}",
+                width = COLUMN_WIDTH * NUMBER_OF_COLUMNS - 10
+            );
+            println!(
+                "{:<TIME_COLUMN_WIDTH$} {:<OPCODE_COLUMN_WIDTH$} {:<OPERAND_COLUMN_WIDTH$} Top Of Stack\n",
+                "Time",
+                "Opcode",
+                "Operands",
+            );
+        }
+
+        assert_eq!(
+            self.vm.stack.len(),
+            0,
+            "run2 can only run top-level scripts."
+        );
+
+        let mut caller_stack: Vec<Caller> = Vec::new();
+
+        let result = loop {
+            if let Some(co) = caller_stack.last_mut().and_then(Caller::as_coroutine_mut) {
+                let last_result = self
+                    .vm
+                    .err
+                    .take()
+                    .map_or_else(|| Ok(self.vm.pop()), |err| Err(err));
+                match co.as_mut().resume(last_result) {
+                    GeneratorState::Yielded(call) => {
+                        prepare_call(call, &mut caller_stack, self);
+                    }
+                    GeneratorState::Returned(res) => {
+                        caller_stack.pop();
+                        match res {
+                            Ok(val) => self.vm.push(val),
+                            Err(err) => self.vm.err = Some(err),
+                        }
+                    }
+                }
+                continue;
+            }
+
+            // Exit the execution loop if there aren't any more callers.
+            let Some(frame) = self.vm.frame_opt() else {
+                break self
+                        .vm
+                        .err
+                        .take()
+                        .map_or_else(|| Ok(self.vm.pop()), Err);
+            };
+
+            if frame.code_block.bytecode.len() <= frame.pc as usize {
+                let push_undef = self.vm.stack.len() <= self.vm.frame().fp as usize;
+
+                // TODO: cleanup this hack.
+                if !caller_stack.is_empty() {
+                    self.restore_caller(
+                        caller_stack
+                            .pop()
+                            .and_then(Caller::into_state)
+                            .expect("already checked that the stack is not empty"),
+                    );
+                }
+
+                if push_undef {
+                    self.vm.push(JsValue::undefined());
+                }
+
+                self.vm.pop_frame();
+                continue;
+            }
+
+            let result = if let Some(err) = self.vm.err.take() {
+                Err(err)
+            } else {
+                #[cfg(feature = "trace")]
+                if self.vm.trace || self.vm.frame().code_block.traceable() {
+                    let mut pc = self.vm.frame().pc as usize;
+                    let opcode: Opcode = self
+                        .vm
+                        .frame()
+                        .code_block
+                        .read::<u8>(pc)
+                        .try_into()
+                        .expect("invalid opcode");
+                    let operands = self
+                        .vm
+                        .frame()
+                        .code_block
+                        .instruction_operands(&mut pc, self.interner());
+
+                    let instant = Instant::now();
+                    let result = self.execute_instruction2();
+
+                    let duration = instant.elapsed();
+                    println!(
+                        "{:<TIME_COLUMN_WIDTH$} {:<OPCODE_COLUMN_WIDTH$} {operands:<OPERAND_COLUMN_WIDTH$} {}",
+                        format!("{}μs", duration.as_micros()),
+                        opcode.as_str(),
+                        match self.vm.stack.last() {
+                            Some(value) if value.is_callable() => "[function]".to_string(),
+                            Some(value) if value.is_object() => "[object]".to_string(),
+                            Some(value) => value.display().to_string(),
+                            None => "<empty>".to_string(),
+                        },
+                    );
+
+                    result
+                } else {
+                    self.execute_instruction2()
+                }
+
+                #[cfg(not(feature = "trace"))]
+                self.execute_instruction2()
+            };
+
+            let completion = match result {
+                Ok(CallResult::Coroutine(mut co)) => {
+                    // first resume value is ignored.
+                    match co.as_mut().resume(Ok(JsValue::undefined())) {
+                        GeneratorState::Yielded(call) => {
+                            caller_stack.push(Caller::Coroutine(co));
+                            prepare_call(call, &mut caller_stack, self);
+                        }
+                        GeneratorState::Returned(res) => match res {
+                            Ok(val) => self.vm.push(val),
+                            Err(err) => self.vm.err = Some(err),
+                        },
+                    };
+                    continue;
+                }
+                Ok(CallResult::DirectCall(call)) => {
+                    prepare_call(call, &mut caller_stack, self);
+                    continue;
+                }
+                Ok(CallResult::Value(completion)) => completion,
+                Err(err) => {
+                    self.vm.err = Some(err);
+
+                    // If this frame has not evaluated the throw as an AbruptCompletion, then evaluate it
+                    let evaluation = Opcode::Throw
+                        .execute(self)
+                        .expect("Opcode::Throw cannot return Err");
+
+                    if evaluation == CompletionType::Normal {
+                        continue;
+                    }
+
+                    CompletionType::Throw
+                }
+            };
+
+            if completion == CompletionType::Throw {
+                // TODO: cleanup this hack.
+                if !caller_stack.is_empty() {
+                    self.restore_caller(
+                        caller_stack
+                            .pop()
+                            .and_then(Caller::into_state)
+                            .expect("already checked that the stack is not empty"),
+                    );
+                }
+                self.vm.pop_frame();
+            } else if completion == CompletionType::Return {
+                let result = self.vm.pop();
+                // TODO: cleanup this hack.
+                if !caller_stack.is_empty() {
+                    self.restore_caller(
+                        caller_stack
+                            .pop()
+                            .and_then(Caller::into_state)
+                            .expect("already checked that the stack is not empty"),
+                    );
+                }
+                self.vm.push(result);
+                self.vm.pop_frame();
+            }
+        };
+
+        result
+    }
+
+    fn restore_caller(&mut self, state: CallerState) {
+        self.vm.environments = state.environments;
+        self.vm.stack = state.stack;
+        self.vm.active_function = state.active_function;
+        self.vm.active_runnable = state.active_runnable;
+        self.enter_realm(state.realm);
+    }
+}
+
+fn prepare_call(call: CallContext, caller_stack: &mut Vec<Caller>, context: &mut Context<'_>) {
+    let CallContext { f, this, args } = call;
+
+    let object = f.borrow();
+    let function_object = object.as_function().expect("not a function");
+    let realm = function_object.realm().clone();
+
+    let old_realm = context.enter_realm(realm);
+
+    let old_active_function = context.vm.active_function.replace(f.clone());
+
+    let (code, mut environments, class_object, mut script_or_module) = match function_object.kind()
+    {
+        FunctionKind::Ordinary {
+            code,
+            environments,
+            class_object,
+            script_or_module,
+            ..
+        } => {
+            let code = code.clone();
+            if code.is_class_constructor() {
+                context.vm.err = Some(
+                    JsNativeError::typ()
+                        .with_message("class constructor cannot be invoked without 'new'")
+                        .with_realm(context.realm().clone())
+                        .into(),
+                );
+                return;
+            }
+            (
+                code,
+                environments.clone(),
+                class_object.clone(),
+                script_or_module.clone(),
+            )
+        }
+        _ => {
+            drop(object);
+            match f.call_internal(&this, &args, context) {
+                Ok(val) => context.vm.push(val),
+                Err(err) => {
+                    context.vm.err = Some(err);
+                }
+            }
+            context.enter_realm(old_realm);
+            context.vm.active_function = old_active_function;
+            return;
+        }
+    };
+
+    drop(object);
+
+    std::mem::swap(&mut environments, &mut context.vm.environments);
+
+    let lexical_this_mode = code.this_mode == ThisMode::Lexical;
+
+    let this = if lexical_this_mode {
+        ThisBindingStatus::Lexical
+    } else if code.strict() {
+        ThisBindingStatus::Initialized(this.clone())
+    } else if this.is_null_or_undefined() {
+        ThisBindingStatus::Initialized(context.realm().global_this().clone().into())
+    } else {
+        ThisBindingStatus::Initialized(
+            this.to_object(context)
+                .expect("conversion cannot fail")
+                .into(),
+        )
+    };
+
+    let mut last_env = code.compile_environments.len() - 1;
+
+    if let Some(class_object) = class_object {
+        let index = context
+            .vm
+            .environments
+            .push_lexical(code.compile_environments[last_env].clone());
+        context
+            .vm
+            .environments
+            .put_lexical_value(index, 0, class_object.into());
+        last_env -= 1;
+    }
+
+    if code.has_binding_identifier() {
+        let index = context
+            .vm
+            .environments
+            .push_lexical(code.compile_environments[last_env].clone());
+        context
+            .vm
+            .environments
+            .put_lexical_value(index, 0, f.clone().into());
+        last_env -= 1;
+    }
+
+    context.vm.environments.push_function(
+        code.compile_environments[last_env].clone(),
+        FunctionSlots::new(this, f.clone(), None),
+    );
+
+    if code.has_parameters_env_bindings() {
+        last_env -= 1;
+        context
+            .vm
+            .environments
+            .push_lexical(code.compile_environments[last_env].clone());
+    }
+
+    // Taken from: `FunctionDeclarationInstantiation` abstract function.
+    //
+    // Spec: https://tc39.es/ecma262/#sec-functiondeclarationinstantiation
+    //
+    // 22. If argumentsObjectNeeded is true, then
+    if code.needs_arguments_object() {
+        // a. If strict is true or simpleParameterList is false, then
+        //     i. Let ao be CreateUnmappedArgumentsObject(argumentsList).
+        // b. Else,
+        //     i. NOTE: A mapped argument object is only provided for non-strict functions
+        //              that don't have a rest parameter, any parameter
+        //              default value initializers, or any destructured parameters.
+        //     ii. Let ao be CreateMappedArgumentsObject(func, formals, argumentsList, env).
+        let arguments_obj = if code.strict() || !code.params.is_simple() {
+            Arguments::create_unmapped_arguments_object(&args, context)
+        } else {
+            let env = context.vm.environments.current();
+            Arguments::create_mapped_arguments_object(
+                &f,
+                &code.params,
+                &args,
+                env.declarative_expect(),
+                context,
+            )
+        };
+        let env_index = context.vm.environments.len() as u32 - 1;
+        context
+            .vm
+            .environments
+            .put_lexical_value(env_index, 0, arguments_obj.into());
+    }
+
+    let argument_count = args.len();
+
+    // Push function arguments to the stack.
+    let mut args = if code.params.as_ref().len() > args.len() {
+        let mut v = args.to_vec();
+        v.extend(vec![
+            JsValue::Undefined;
+            code.params.as_ref().len() - args.len()
+        ]);
+        v
+    } else {
+        args.to_vec()
+    };
+    args.reverse();
+    let mut stack = args;
+
+    std::mem::swap(&mut context.vm.stack, &mut stack);
+
+    let frame = CallFrame::new(code).with_argument_count(argument_count as u32);
+
+    std::mem::swap(&mut context.vm.active_runnable, &mut script_or_module);
+
+    context.vm.push_frame(frame);
+
+    caller_stack.push(Caller::Caller(CallerState {
+        realm: old_realm,
+        active_function: old_active_function,
+        environments,
+        stack,
+        active_runnable: script_or_module,
+    }));
 }

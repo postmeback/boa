@@ -1,7 +1,10 @@
+use thin_vec::ThinVec;
+
 use crate::{
     builtins::{function::FunctionKind, promise::PromiseCapability, Promise},
     error::JsNativeError,
     module::{ModuleKind, Referrer},
+    native_function::{CallContext, CallResult},
     object::FunctionObjectBuilder,
     vm::{opcode::Operation, CompletionType},
     Context, JsResult, JsValue, NativeFunction,
@@ -197,6 +200,40 @@ impl Operation for Call {
 
         context.vm.push(result);
         Ok(CompletionType::Normal)
+    }
+
+    fn execute2(context: &mut Context<'_>) -> JsResult<CallResult<CompletionType>> {
+        let argument_count = context.vm.read::<u32>();
+        let mut arguments = ThinVec::with_capacity(argument_count as usize);
+        for _ in 0..argument_count {
+            arguments.push(context.vm.pop());
+        }
+        arguments.reverse();
+
+        let func = context.vm.pop();
+        let this = context.vm.pop();
+
+        let object = match func {
+            JsValue::Object(ref object) if object.is_callable() => object.clone(),
+            _ => {
+                return Err(JsNativeError::typ()
+                    .with_message("not a callable function")
+                    .into());
+            }
+        };
+
+        if object.is_function() {
+            Ok(CallResult::DirectCall(CallContext {
+                f: object,
+                this,
+                args: arguments,
+            }))
+        } else {
+            let result = object.__call__(&this, &arguments, context)?;
+
+            context.vm.push(result);
+            Ok(CallResult::Value(CompletionType::Normal))
+        }
     }
 }
 

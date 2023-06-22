@@ -430,6 +430,7 @@ dependencies = [
  "indoc",
  "itertools",
  "jemallocator",
+ "next-gen",
  "num-bigint",
  "num-integer",
  "num-traits",
@@ -2727,6 +2728,27 @@ dependencies = [
 ]
 
 [[package]]
+name = "next-gen"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1962f0b64c859f27f9551c74afbdbec7090fa83518daf6c5eb5b31d153455beb"
+dependencies = [
+ "next-gen-proc_macros",
+ "unwind_safe",
+]
+
+[[package]]
+name = "next-gen-proc_macros"
+version = "0.1.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a59395d2ffdd03894479cdd1ce4b7e0700d379d517f2d396cee2a4828707c5a0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 1.0.109",
+]
+
+[[package]]
 name = "nibble_vec"
 version = "0.1.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4478,6 +4500,12 @@ name = "unsafe-libyaml"
 version = "0.2.8"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1865806a559042e51ab5414598446a5871b561d21b6764f2eabb0dd481d880a6"
+
+[[package]]
+name = "unwind_safe"
+version = "0.1.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0976c77def3f1f75c4ef892a292c31c0bbe9e3d0702c63044d7c76db298171a3"
 
 [[package]]
 name = "url"

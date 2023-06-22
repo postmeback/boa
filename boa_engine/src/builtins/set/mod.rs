@@ -19,9 +19,13 @@ pub mod ordered_set;
 
 use self::ordered_set::OrderedSet;
 use crate::{
-    builtins::{BuiltInBuilder, BuiltInConstructor, BuiltInObject, IntrinsicObject},
+    builtins::{
+        set::ordered_set::SetLock, BuiltInBuilder, BuiltInConstructor, BuiltInObject,
+        IntrinsicObject,
+    },
     context::intrinsics::{Intrinsics, StandardConstructor, StandardConstructors},
     error::JsNativeError,
+    native_function::{CallContext, CallResult},
     object::{internal_methods::get_prototype_from_constructor, JsObject, ObjectData},
     property::{Attribute, PropertyNameKind},
     realm::Realm,
@@ -30,9 +34,11 @@ use crate::{
     Context, JsArgs, JsResult, JsValue,
 };
 use boa_profiler::Profiler;
+use next_gen::{generator, mk_gen};
 use num_traits::Zero;
 
 pub(crate) use set_iterator::SetIterator;
+use thin_vec::thin_vec;
 
 #[derive(Debug, Clone)]
 pub(crate) struct Set;
@@ -67,7 +73,7 @@ impl IntrinsicObject for Set {
             .method(Self::clear, "clear", 0)
             .method(Self::delete, "delete", 1)
             .method(Self::entries, "entries", 0)
-            .method(Self::for_each, "forEach", 1)
+            .method2(Self::for_each, "forEach", 1)
             .method(Self::has, "has", 1)
             .property(
                 utf16!("keys"),
@@ -368,8 +374,8 @@ impl Set {
     pub(crate) fn for_each(
         this: &JsValue,
         args: &[JsValue],
-        context: &mut Context<'_>,
-    ) -> JsResult<JsValue> {
+        _context: &mut Context<'_>,
+    ) -> JsResult<CallResult<JsValue>> {
         // 1. Let S be the this value.
         // 2. Perform ? RequireInternalSlot(S, [[SetData]]).
         let Some(lock) = this.as_object().and_then(|o| o.borrow_mut().as_set_mut().map(|set| set.lock(o.clone()))) else {
@@ -385,40 +391,52 @@ impl Set {
                 .into());
         };
 
-        // 4. Let entries be S.[[SetData]].
-        // 5. Let numEntries be the number of elements in entries.
-        // 6. Let index be 0.
-        let mut index = 0;
+        #[generator(yield(CallContext), resume(JsResult<JsValue>))]
+        fn resume(
+            this: JsValue,
+            lock: SetLock,
+            callback: JsObject,
+            callback_this: JsValue,
+        ) -> JsResult<JsValue> {
+            // 4. Let entries be S.[[SetData]].
+            // 5. Let numEntries be the number of elements in entries.
+            // 6. Let index be 0.
+            let mut index = 0;
 
-        // 7. Repeat, while index < numEntries,
-        while index < Self::get_size_full(this)? {
-            // a. Let e be entries[index].
-            let Some(e) = this.as_object().and_then(|o| o.borrow().as_set().map(|s| s.get_index(index).cloned())) else {
-                return Err(JsNativeError::typ()
-                    .with_message("Method Set.prototype.forEach called on incompatible receiver")
-                    .into());
-            };
+            // 7. Repeat, while index < numEntries,
+            while index < Set::get_size_full(&this)? {
+                // a. Let e be entries[index].
+                let Some(e) = this.as_object().and_then(|o| o.borrow().as_set().map(|s| s.get_index(index).cloned())) else {
+                    return Err(JsNativeError::typ()
+                        .with_message("Method Set.prototype.forEach called on incompatible receiver")
+                        .into());
+                };
 
-            // b. Set index to index + 1.
-            index += 1;
+                // b. Set index to index + 1.
+                index += 1;
 
-            // c. If e is not empty, then
-            if let Some(e) = e {
-                // i. Perform ? Call(callbackfn, thisArg, « e, e, S »).
-                // ii. NOTE: The number of elements in entries may have increased during execution of callbackfn.
-                // iii. Set numEntries to the number of elements in entries.
-                callback_fn.call(
-                    args.get_or_undefined(1),
-                    &[e.clone(), e.clone(), this.clone()],
-                    context,
-                )?;
+                // c. If e is not empty, then
+                if let Some(e) = e {
+                    // i. Perform ? Call(callbackfn, thisArg, « e, e, S »).
+                    // ii. NOTE: The number of elements in entries may have increased during execution of callbackfn.
+                    // iii. Set numEntries to the number of elements in entries.
+                    yield_!(CallContext {
+                        f: callback.clone(),
+                        this: callback_this.clone(),
+                        args: thin_vec![e.clone(), e.clone(), this.clone()]
+                    })?;
+                }
             }
+
+            drop(lock);
+
+            // 8. Return undefined.
+            Ok(JsValue::Undefined)
         }
 
-        drop(lock);
+        mk_gen!(let gen = box resume(this.clone(), lock, callback_fn.clone(), args.get_or_undefined(1).clone()));
 
-        // 8. Return undefined.
-        Ok(JsValue::Undefined)
+        Ok(CallResult::Coroutine(gen))
     }
 
     /// `Map.prototype.has( key )`

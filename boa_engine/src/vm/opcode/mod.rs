@@ -1,5 +1,5 @@
 /// The opcodes of the vm.
-use crate::{vm::CompletionType, Context, JsResult};
+use crate::{native_function::CallResult, vm::CompletionType, Context, JsResult};
 
 // Operation modules
 mod await_stm;
@@ -155,6 +155,14 @@ macro_rules! generate_impl {
             pub(super) fn execute(self, context: &mut Context<'_>) -> JsResult<CompletionType> {
                 Self::EXECUTE_FNS[self as usize](context)
             }
+
+            const EXECUTE2_FNS: [fn(&mut Context<'_>) -> JsResult<CallResult<CompletionType>>; Self::MAX] = [
+                $(<generate_impl!(name $Variant $(=> $mapping)?)>::execute2),*
+            ];
+
+            pub(super) fn execute2(self, context: &mut Context<'_>) -> JsResult<CallResult<CompletionType>> {
+                Self::EXECUTE2_FNS[self as usize](context)
+            }
         }
     };
 }
@@ -170,6 +178,10 @@ pub(crate) trait Operation {
     const INSTRUCTION: &'static str;
 
     fn execute(context: &mut Context<'_>) -> JsResult<CompletionType>;
+
+    fn execute2(context: &mut Context<'_>) -> JsResult<CallResult<CompletionType>> {
+        Self::execute(context).map(CallResult::Value)
+    }
 }
 
 generate_impl! {

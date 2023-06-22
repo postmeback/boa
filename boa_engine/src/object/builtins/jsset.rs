@@ -8,7 +8,7 @@ use crate::{
     error::JsNativeError,
     object::{JsFunction, JsObject, JsObjectType, JsSetIterator},
     value::TryFromJs,
-    Context, JsResult, JsValue,
+    Context, JsResult, JsValue, NativeFunction,
 };
 
 /// `JsSet` provides a wrapper for Boa's implementation of the ECMAScript `Set` object.
@@ -134,7 +134,7 @@ impl JsSet {
         this_arg: JsValue,
         context: &mut Context<'_>,
     ) -> JsResult<JsValue> {
-        Set::for_each(
+        NativeFunction::from_fn_ptr_2(Set::for_each).call(
             &self.inner.clone().into(),
             &[callback.into(), this_arg],
             context,

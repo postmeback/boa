@@ -93,7 +93,7 @@ use crate::{
     },
     context::intrinsics::{Intrinsics, StandardConstructor, StandardConstructors},
     js_string,
-    native_function::{NativeFunction, NativeFunctionPointer},
+    native_function::{NativeFunction, NativeFunctionPointer, NativeFunctionPointer2},
     object::{
         shape::{property_table::PropertyTableInner, slot::SlotAttributes},
         FunctionBinding, JsFunction, JsObject, JsPrototype, Object, ObjectData, ObjectKind,
@@ -678,6 +678,34 @@ impl BuiltInConstructorWithPrototype<'_> {
         self
     }
 
+    fn static_method2<B>(
+        mut self,
+        function: NativeFunctionPointer2,
+        binding: B,
+        length: usize,
+    ) -> Self
+    where
+        B: Into<FunctionBinding>,
+    {
+        let binding = binding.into();
+        let function = BuiltInBuilder::callable2(self.realm, function)
+            .name(binding.name)
+            .length(length)
+            .build();
+
+        debug_assert!(self
+            .object_property_table
+            .map
+            .get(&binding.binding)
+            .is_none());
+        self.object_property_table.insert(
+            binding.binding,
+            SlotAttributes::WRITABLE | SlotAttributes::CONFIGURABLE,
+        );
+        self.object_storage.push(function.into());
+        self
+    }
+
     /// Adds a new static data property to the builtin object.
     fn static_property<K, V>(mut self, key: K, value: V, attribute: Attribute) -> Self
     where
@@ -735,6 +763,29 @@ impl BuiltInConstructorWithPrototype<'_> {
     {
         let binding = binding.into();
         let function = BuiltInBuilder::callable(self.realm, function)
+            .name(binding.name)
+            .length(length)
+            .build();
+
+        debug_assert!(self
+            .prototype_property_table
+            .map
+            .get(&binding.binding)
+            .is_none());
+        self.prototype_property_table.insert(
+            binding.binding,
+            SlotAttributes::WRITABLE | SlotAttributes::CONFIGURABLE,
+        );
+        self.prototype_storage.push(function.into());
+        self
+    }
+
+    fn method2<B>(mut self, function: NativeFunctionPointer2, binding: B, length: usize) -> Self
+    where
+        B: Into<FunctionBinding>,
+    {
+        let binding = binding.into();
+        let function = BuiltInBuilder::callable2(self.realm, function)
             .name(binding.name)
             .length(length)
             .build();
@@ -893,9 +944,14 @@ impl BuiltInConstructorWithPrototype<'_> {
 
 struct BuiltInCallable<'ctx> {
     realm: &'ctx Realm,
-    function: NativeFunctionPointer,
+    function: FunctionType,
     name: JsString,
     length: usize,
+}
+
+enum FunctionType {
+    FnPtr(NativeFunctionPointer),
+    FnPtr2(NativeFunctionPointer2),
 }
 
 impl BuiltInCallable<'_> {
@@ -918,7 +974,10 @@ impl BuiltInCallable<'_> {
 
     fn build(self) -> JsFunction {
         let function = function::FunctionKind::Native {
-            function: NativeFunction::from_fn_ptr(self.function),
+            function: match self.function {
+                FunctionType::FnPtr(f) => NativeFunction::from_fn_ptr(f),
+                FunctionType::FnPtr2(f) => NativeFunction::from_fn_ptr_2(f),
+            },
             constructor: None,
         };
 
@@ -937,7 +996,16 @@ impl<'ctx> BuiltInBuilder<'ctx, OrdinaryObject> {
     fn callable(realm: &'ctx Realm, function: NativeFunctionPointer) -> BuiltInCallable<'ctx> {
         BuiltInCallable {
             realm,
-            function,
+            function: FunctionType::FnPtr(function),
+            length: 0,
+            name: js_string!(""),
+        }
+    }
+
+    fn callable2(realm: &'ctx Realm, function: NativeFunctionPointer2) -> BuiltInCallable<'ctx> {
+        BuiltInCallable {
+            realm,
+            function: FunctionType::FnPtr2(function),
             length: 0,
             name: js_string!(""),
         }
