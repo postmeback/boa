@@ -41,6 +41,5 @@ impl ByteCompiler<'_, '_> {
         let labelled_end = self.next_opcode_location();
         self.patch_jump_with_target(end_label, labelled_end);
         self.pop_labelled_control_info();
-        self.emit_opcode(Opcode::LabelledEnd);
     }
 }

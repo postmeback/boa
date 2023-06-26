@@ -312,10 +312,9 @@ impl Context<'_> {
                         }
                     }
 
-                    self.vm.err = Some(err);
+                    self.vm.err = Some(err.clone());
 
-                    // If this frame has not evaluated the throw as an AbruptCompletion, then evaluate it
-                    let evaluation = Opcode::Throw
+                    let evaluation = Opcode::ReThrow
                         .execute(self)
                         .expect("Opcode::Throw cannot return Err");
 
@@ -359,11 +358,6 @@ impl Context<'_> {
             println!("\n");
         }
 
-        if execution_completion == CompletionType::Throw
-            || execution_completion == CompletionType::Return
-        {
-            self.vm.frame_mut().abrupt_completion = None;
-        }
         self.vm.stack.truncate(self.vm.frame().fp as usize);
 
         // Determine the execution result

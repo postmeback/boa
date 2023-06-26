@@ -1117,12 +1117,33 @@ generate_impl! {
         /// Stack: value **=>** value
         JumpIfNullOrUndefined,
 
+        /// Jump table
+        ///
+        /// Operands: count: `u32`, default: `u32`, address: `u32` * count
+        ///
+        /// Stack: value **=>**
+        JumpTable,
+
         /// Throw exception
         ///
         /// Operands:
         ///
         /// Stack: value **=>**
         Throw,
+
+        /// Rethrow thrown exception
+        ///
+        /// Operands:
+        ///
+        /// Stack: **=>**
+        ReThrow,
+
+        /// Get the thrown exception and push on the stack.
+        ///
+        /// Operands:
+        ///
+        /// Stack: **=>** exception
+        Exception,
 
         /// Throw a new `TypeError` exception
         ///
@@ -1152,25 +1173,18 @@ generate_impl! {
         /// Stack: **=>**
         FinallyStart,
 
-        /// End of a finally block.
+        /// Unconditional Jump
         ///
-        /// Operands:
+        /// Operands: Jump Address: u32
         ///
         /// Stack: **=>**
-        FinallyEnd,
-
-        /// Jumps to a target location and pops the environments involved.
-        ///
-        /// Operands: Jump Address: u32, Target address: u32
-        ///
-        /// Stack: loop_return_value **=>**
         Break,
 
-        /// Sets the `AbruptCompletionRecord` for a delayed continue
+        /// Unconditional Jump
         ///
-        /// Operands: Jump Address: u32, Target address: u32,
+        /// Operands: Jump Address: u32
         ///
-        /// Stack: loop_return_value **=>**
+        /// Stack: **=>**
         Continue,
 
         /// Pops value converts it to boolean and pushes it back.
@@ -1377,11 +1391,7 @@ generate_impl! {
         /// Stack: **=>**
         PopEnvironment,
 
-        /// Push loop start marker.
-        ///
-        /// Operands:
-        /// - start: `u32`
-        /// - exit: `u32`
+        /// Loop start marker.
         ///
         /// Stack: **=>**
         LoopStart,
@@ -1792,10 +1802,6 @@ generate_impl! {
         Reserved53 => Reserved,
         /// Reserved [`Opcode`].
         Reserved54 => Reserved,
-        /// Reserved [`Opcode`].
-        Reserved55 => Reserved,
-        /// Reserved [`Opcode`].
-        Reserved56 => Reserved,
     }
 }
 

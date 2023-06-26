@@ -9,9 +9,50 @@
 //! [try spec]: https://tc39.es/ecma262/#sec-try-statement
 //! [labelled spec]: https://tc39.es/ecma262/#sec-labelled-statements
 
-use crate::bytecompiler::{ByteCompiler, Label};
+use crate::{
+    bytecompiler::{ByteCompiler, Label},
+    vm::Opcode,
+};
 use bitflags::bitflags;
 use boa_interner::Sym;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum JumpRecordKind {
+    Break,
+    Continue,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct JumpRecord {
+    kind: JumpRecordKind,
+    label: Option<Sym>,
+    address: Label,
+    target_index: Option<usize>,
+}
+
+impl JumpRecord {
+    pub(crate) const fn new(
+        kind: JumpRecordKind,
+        label: Option<Sym>,
+        address: Label,
+        target_index: Option<usize>,
+    ) -> Self {
+        Self {
+            kind,
+            label,
+            address,
+            target_index,
+        }
+    }
+
+    pub(crate) const fn label(&self) -> Option<Sym> {
+        self.label
+    }
+
+    pub(crate) const fn target_index(&self) -> Option<usize> {
+        self.target_index
+    }
+}
 
 /// Boa's `ByteCompiler` jump information tracking struct.
 #[derive(Debug, Clone)]
@@ -19,9 +60,8 @@ pub(crate) struct JumpControlInfo {
     label: Option<Sym>,
     start_address: u32,
     flags: JumpControlInfoFlags,
-    set_jumps: Vec<Label>,
-    breaks: Vec<Label>,
-    try_continues: Vec<Label>,
+    pub(crate) jumps: Vec<JumpRecord>,
+    current_open_environments_count: u32,
 }
 
 bitflags! {
@@ -32,7 +72,6 @@ bitflags! {
         const SWITCH = 0b0000_0010;
         const TRY_BLOCK = 0b0000_0100;
         const LABELLED = 0b0000_1000;
-        const IN_FINALLY = 0b0001_0000;
         const HAS_FINALLY = 0b0010_0000;
         const ITERATOR_LOOP = 0b0100_0000;
         const FOR_AWAIT_OF_LOOP = 0b1000_0000;
@@ -41,6 +80,13 @@ bitflags! {
         ///
         /// This bitflag is inherited if the previous [`JumpControlInfo`].
         const USE_EXPR = 0b0001_0000_0000;
+
+        /// Does the control flow jump (`break` or `continue`) require to special finally code generation.
+        ///
+        /// This is needed for `break` and `continue`s that are in a try statement
+        /// (try or catch blocks, for finally not needed because it is already executing it).
+        ///
+        const REQUIRE_FINALLY_HANDLING = 0b0010_0000_0000;
     }
 }
 
@@ -50,21 +96,18 @@ impl Default for JumpControlInfoFlags {
     }
 }
 
-impl Default for JumpControlInfo {
-    fn default() -> Self {
+/// ---- `JumpControlInfo` Creation Methods ----
+impl JumpControlInfo {
+    fn new(current_open_environments_count: u32) -> Self {
         Self {
             label: None,
             start_address: u32::MAX,
             flags: JumpControlInfoFlags::default(),
-            set_jumps: Vec::new(),
-            breaks: Vec::new(),
-            try_continues: Vec::new(),
+            jumps: Vec::new(),
+            current_open_environments_count,
         }
     }
-}
 
-/// ---- `JumpControlInfo` Creation Methods ----
-impl JumpControlInfo {
     pub(crate) const fn with_label(mut self, label: Option<Sym>) -> Self {
         self.label = label;
         self
@@ -138,10 +181,6 @@ impl JumpControlInfo {
         self.flags.contains(JumpControlInfoFlags::LABELLED)
     }
 
-    pub(crate) const fn in_finally(&self) -> bool {
-        self.flags.contains(JumpControlInfoFlags::IN_FINALLY)
-    }
-
     pub(crate) const fn has_finally(&self) -> bool {
         self.flags.contains(JumpControlInfoFlags::HAS_FINALLY)
     }
@@ -150,10 +189,12 @@ impl JumpControlInfo {
         self.flags.contains(JumpControlInfoFlags::USE_EXPR)
     }
 
+    #[allow(dead_code)]
     pub(crate) const fn iterator_loop(&self) -> bool {
         self.flags.contains(JumpControlInfoFlags::ITERATOR_LOOP)
     }
 
+    #[allow(dead_code)]
     pub(crate) const fn for_await_of_loop(&self) -> bool {
         self.flags.contains(JumpControlInfoFlags::FOR_AWAIT_OF_LOOP)
     }
@@ -172,23 +213,32 @@ impl JumpControlInfo {
         self.start_address = start_address;
     }
 
-    /// Set the `in_finally` field of `JumpControlInfo`.
-    pub(crate) fn set_in_finally(&mut self, value: bool) {
-        self.flags.set(JumpControlInfoFlags::IN_FINALLY, value);
+    pub(crate) fn push_break_label(
+        &mut self,
+        label: Option<Sym>,
+        address: Label,
+        final_target: Option<usize>,
+    ) {
+        self.jumps.push(JumpRecord::new(
+            JumpRecordKind::Break,
+            label,
+            address,
+            final_target,
+        ));
     }
 
-    /// Pushes a `Label` onto the `break` vector of `JumpControlInfo`.
-    pub(crate) fn push_break_label(&mut self, break_label: Label) {
-        self.breaks.push(break_label);
-    }
-
-    /// Pushes a `Label` onto the `try_continues` vector of `JumpControlInfo`.
-    pub(crate) fn push_try_continue_label(&mut self, try_continue_label: Label) {
-        self.try_continues.push(try_continue_label);
-    }
-
-    pub(crate) fn push_set_jumps(&mut self, set_jump_label: Label) {
-        self.set_jumps.push(set_jump_label);
+    pub(crate) fn push_continue_label(
+        &mut self,
+        label: Option<Sym>,
+        address: Label,
+        final_target: Option<usize>,
+    ) {
+        self.jumps.push(JumpRecord::new(
+            JumpRecordKind::Continue,
+            label,
+            address,
+            final_target,
+        ));
     }
 }
 
@@ -198,7 +248,8 @@ impl ByteCompiler<'_, '_> {
     ///
     /// Default `JumpControlInfoKind` is `JumpControlInfoKind::Loop`
     pub(crate) fn push_empty_loop_jump_control(&mut self, use_expr: bool) {
-        let new_info = JumpControlInfo::default().with_loop_flag(true);
+        let new_info =
+            JumpControlInfo::new(self.current_open_environments_count).with_loop_flag(true);
         self.push_contol_info(new_info, use_expr);
     }
 
@@ -242,7 +293,7 @@ impl ByteCompiler<'_, '_> {
         start_address: u32,
         use_expr: bool,
     ) {
-        let new_info = JumpControlInfo::default()
+        let new_info = JumpControlInfo::new(self.current_open_environments_count)
             .with_labelled_block_flag(true)
             .with_label(Some(label))
             .with_start_address(start_address);
@@ -260,13 +311,30 @@ impl ByteCompiler<'_, '_> {
         let info = self.jump_info.pop().expect("no jump information found");
 
         assert!(info.is_labelled());
+        assert!(info.label().is_some());
 
-        for label in info.breaks {
-            self.patch_jump(label);
-        }
+        for jump @ JumpRecord {
+            label,
+            kind,
+            address,
+            ..
+        } in &info.jumps
+        {
+            if info.label() == *label {
+                match kind {
+                    JumpRecordKind::Break => self.patch_jump(*address),
+                    JumpRecordKind::Continue => {
+                        self.patch_jump_with_target(*address, info.start_address)
+                    }
+                }
+                continue;
+            }
 
-        for label in info.try_continues {
-            self.patch_jump_with_target(label, info.start_address);
+            self.jump_info
+                .last_mut()
+                .expect("There should be a previous JumpInfo")
+                .jumps
+                .push(*jump);
         }
     }
     // ---- `IterationStatement`'s `JumpControlInfo` methods ---- //
@@ -278,7 +346,7 @@ impl ByteCompiler<'_, '_> {
         start_address: u32,
         use_expr: bool,
     ) {
-        let new_info = JumpControlInfo::default()
+        let new_info = JumpControlInfo::new(self.current_open_environments_count)
             .with_loop_flag(true)
             .with_label(label)
             .with_start_address(start_address);
@@ -293,7 +361,7 @@ impl ByteCompiler<'_, '_> {
         start_address: u32,
         use_expr: bool,
     ) {
-        let new_info = JumpControlInfo::default()
+        let new_info = JumpControlInfo::new(self.current_open_environments_count)
             .with_loop_flag(true)
             .with_label(label)
             .with_start_address(start_address)
@@ -308,7 +376,7 @@ impl ByteCompiler<'_, '_> {
         start_address: u32,
         use_expr: bool,
     ) {
-        let new_info = JumpControlInfo::default()
+        let new_info = JumpControlInfo::new(self.current_open_environments_count)
             .with_loop_flag(true)
             .with_label(label)
             .with_start_address(start_address)
@@ -330,12 +398,11 @@ impl ByteCompiler<'_, '_> {
         assert!(info.is_loop());
 
         let start_address = info.start_address();
-        for label in info.try_continues {
-            self.patch_jump_with_target(label, start_address);
-        }
-
-        for label in info.breaks {
-            self.patch_jump(label);
+        for JumpRecord { kind, address, .. } in info.jumps {
+            match kind {
+                JumpRecordKind::Break => self.patch_jump(address),
+                JumpRecordKind::Continue => self.patch_jump_with_target(address, start_address),
+            }
         }
     }
 
@@ -348,7 +415,7 @@ impl ByteCompiler<'_, '_> {
         start_address: u32,
         use_expr: bool,
     ) {
-        let new_info = JumpControlInfo::default()
+        let new_info = JumpControlInfo::new(self.current_open_environments_count)
             .with_switch_flag(true)
             .with_label(label)
             .with_start_address(start_address);
@@ -367,8 +434,17 @@ impl ByteCompiler<'_, '_> {
 
         assert!(info.is_switch());
 
-        for label in info.breaks {
-            self.patch_jump(label);
+        for jump in info.jumps {
+            match jump.kind {
+                JumpRecordKind::Break => self.patch_jump(jump.address),
+                JumpRecordKind::Continue => {
+                    self.jump_info
+                        .last_mut()
+                        .expect("There should be a previous JumpInfo")
+                        .jumps
+                        .push(jump);
+                }
+            }
         }
     }
 
@@ -381,7 +457,7 @@ impl ByteCompiler<'_, '_> {
         start_address: u32,
         use_expr: bool,
     ) {
-        let new_info = JumpControlInfo::default()
+        let new_info = JumpControlInfo::new(self.current_open_environments_count)
             .with_try_block_flag(true)
             .with_start_address(start_address)
             .with_has_finally(has_finally);
@@ -402,68 +478,72 @@ impl ByteCompiler<'_, '_> {
 
         // Handle breaks. If there is a finally, breaks should go to the finally
         if info.has_finally() {
-            for label in info.breaks {
-                self.patch_jump_with_target(label, try_end);
+            for JumpRecord { address, .. } in &info.jumps {
+                self.patch_jump_with_target(*address, try_end);
             }
-        } else {
-            // When there is no finally, search for the break point.
-            for jump_info in self.jump_info.iter_mut().rev() {
-                if !jump_info.is_labelled() {
-                    jump_info.breaks.append(&mut info.breaks);
-                    break;
+
+            let (jumps, default) = self.jump_table(info.jumps.len() as u32);
+
+            // Handle breaks in a finally block
+            for (i, label) in jumps.iter().enumerate() {
+                if let Some(jump_info) = self.jump_info.last_mut() {
+                    let jump_record = &info.jumps[i];
+                    let environments_to_pop = info.current_open_environments_count
+                        - jump_info.current_open_environments_count;
+                    let next = if environments_to_pop == 0 {
+                        *label
+                    } else {
+                        let next_index = jump_info.jumps.len();
+                        let is_try_block_and_has_finally =
+                            jump_info.is_try_block() && jump_info.has_finally();
+
+                        self.patch_jump(*label);
+                        for _ in 0..environments_to_pop {
+                            self.emit_opcode(Opcode::PopEnvironment);
+                        }
+
+                        if is_try_block_and_has_finally {
+                            self.emit_push_integer(next_index as i32 + 1);
+                            self.emit_opcode(Opcode::PushFalse);
+                        }
+
+                        self.jump()
+                    };
+
+                    // A target cannot be a try so we append to previous `JumpInfo`.
+                    let jump_info = self.jump_info.last_mut().expect("jump info disapeared");
+                    match jump_record.kind {
+                        JumpRecordKind::Break => jump_info.push_break_label(
+                            jump_record.label(),
+                            next,
+                            jump_record.target_index(),
+                        ),
+                        JumpRecordKind::Continue => jump_info.push_continue_label(
+                            jump_record.label(),
+                            next,
+                            jump_record.target_index(),
+                        ),
+                    }
                 }
             }
-        }
 
-        // Handle set_jumps
-        for label in info.set_jumps {
-            for jump_info in self.jump_info.iter_mut().rev() {
-                if jump_info.is_loop() || jump_info.is_switch() {
-                    jump_info.breaks.push(label);
-                    break;
-                }
-            }
-        }
-
-        // Pass continues down the stack.
-        if let Some(jump_info) = self.jump_info.last_mut() {
-            jump_info.try_continues.append(&mut info.try_continues);
+            self.patch_jump(default);
+        } else if !info.jumps.is_empty() {
+            // When there is no finally, append to previous `JumpInfo`.
+            self.jump_info
+                .last_mut()
+                .expect("There should be a previous JumpInfo")
+                .jumps
+                .append(&mut info.jumps);
         }
     }
 
-    /// Pushes a `TryStatement`'s Finally block `JumpControlInfo` onto the `jump_info` stack.
-    pub(crate) fn push_init_finally_control_info(&mut self, use_expr: bool) {
-        let mut new_info = JumpControlInfo::default().with_try_block_flag(true);
-
-        new_info.set_in_finally(true);
-
-        self.push_contol_info(new_info, use_expr);
-    }
-
-    pub(crate) fn pop_finally_control_info(&mut self) {
-        assert!(!self.jump_info.is_empty());
-        let mut info = self.jump_info.pop().expect("no jump information found");
-
-        assert!(info.in_finally());
-
-        // Handle set_jumps
-        for label in info.set_jumps {
-            for jump_info in self.jump_info.iter_mut().rev() {
-                if jump_info.is_loop() || jump_info.is_switch() {
-                    jump_info.breaks.push(label);
-                    break;
-                }
-            }
+    pub(crate) fn jump_info_open_environment_count(&self, index: usize) -> u32 {
+        let current = &self.jump_info[index];
+        if let Some(next) = self.jump_info.get(index + 1) {
+            return next.current_open_environments_count - current.current_open_environments_count;
         }
 
-        // Handle breaks in a finally block
-        for label in info.breaks {
-            self.patch_jump(label);
-        }
-
-        // Pass continues down the stack.
-        if let Some(jump_info) = self.jump_info.last_mut() {
-            jump_info.try_continues.append(&mut info.try_continues);
-        }
+        self.current_open_environments_count - current.current_open_environments_count
     }
 }

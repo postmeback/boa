@@ -249,6 +249,8 @@ pub struct ByteCompiler<'ctx, 'host> {
     /// The environment that is currently active.
     pub(crate) current_environment: Rc<RefCell<CompileTimeEnvironment>>,
 
+    pub(crate) current_open_environments_count: u32,
+
     pub(crate) code_block_flags: CodeBlockFlags,
 
     literals_map: FxHashMap<Literal, u32>,
@@ -293,6 +295,7 @@ impl<'ctx, 'host> ByteCompiler<'ctx, 'host> {
             this_mode: ThisMode::Global,
             params: FormalParameterList::default(),
             compile_environments: Vec::default(),
+            current_open_environments_count: 0,
             code_block_flags,
 
             literals_map: FxHashMap::default(),
@@ -504,6 +507,21 @@ impl<'ctx, 'host> ByteCompiler<'ctx, 'host> {
 
     fn jump_if_null_or_undefined(&mut self) -> Label {
         self.emit_opcode_with_operand(Opcode::JumpIfNullOrUndefined)
+    }
+
+    fn jump_table(&mut self, count: u32) -> (Vec<Label>, Label) {
+        let index = self.next_opcode_location();
+        self.emit(Opcode::JumpTable, &[count, Self::DUMMY_ADDRESS]);
+        let default = Label { index: index + 4 };
+        let mut labels = Vec::with_capacity(count as usize);
+        for i in 0..count {
+            labels.push(Label {
+                index: index + 8 + 4 * i,
+            });
+            self.emit_u32(Self::DUMMY_ADDRESS);
+        }
+
+        (labels, default)
     }
 
     /// Emit an opcode with a dummy operand.

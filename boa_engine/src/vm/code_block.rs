@@ -337,10 +337,6 @@ impl CodeBlock {
                 format!("{operand}")
             }
             Opcode::CopyDataProperties
-            | Opcode::Break
-            | Opcode::Continue
-            | Opcode::LoopStart
-            | Opcode::IteratorLoopStart
             | Opcode::TryStart
             | Opcode::GeneratorDelegateNext
             | Opcode::GeneratorDelegateResume => {
@@ -349,6 +345,11 @@ impl CodeBlock {
                 let operand2 = self.read::<u32>(*pc);
                 *pc += size_of::<u32>();
                 format!("{operand1}, {operand2}")
+            }
+            Opcode::Break | Opcode::Continue => {
+                let operand = self.read::<u32>(*pc);
+                *pc += size_of::<u32>();
+                format!("{operand}")
             }
             Opcode::TemplateLookup | Opcode::TemplateCreate => {
                 let operand1 = self.read::<u32>(*pc);
@@ -432,6 +433,21 @@ impl CodeBlock {
                 *pc += size_of::<u32>() * (count as usize + 1);
                 String::new()
             }
+            Opcode::JumpTable => {
+                let count = self.read::<u32>(*pc);
+                *pc += size_of::<u32>();
+                let default = self.read::<u32>(*pc);
+                *pc += size_of::<u32>();
+
+                let mut operands = format!("#{count}: Default: {default:4}");
+                for i in 1..(count + 1) {
+                    let address = self.read::<u32>(*pc);
+                    *pc += size_of::<u32>();
+
+                    operands += &format!(", {i}: {address}");
+                }
+                operands
+            }
             Opcode::GeneratorJumpOnResumeKind => {
                 let normal = self.read::<u32>(*pc);
                 *pc += size_of::<u32>();
@@ -512,14 +528,17 @@ impl CodeBlock {
             | Opcode::ToPropertyKey
             | Opcode::ToBoolean
             | Opcode::Throw
+            | Opcode::ReThrow
+            | Opcode::Exception
             | Opcode::TryEnd
-            | Opcode::FinallyEnd
             | Opcode::This
             | Opcode::Super
             | Opcode::Return
             | Opcode::PopEnvironment
             | Opcode::LoopEnd
             | Opcode::LoopContinue
+            | Opcode::LoopStart
+            | Opcode::IteratorLoopStart
             | Opcode::LabelledEnd
             | Opcode::CreateForInIterator
             | Opcode::GetIterator
@@ -618,9 +637,7 @@ impl CodeBlock {
             | Opcode::Reserved51
             | Opcode::Reserved52
             | Opcode::Reserved53
-            | Opcode::Reserved54
-            | Opcode::Reserved55
-            | Opcode::Reserved56 => unreachable!("Reserved opcodes are unrechable"),
+            | Opcode::Reserved54 => unreachable!("Reserved opcodes are unrechable"),
         }
     }
 }

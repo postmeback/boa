@@ -1,5 +1,5 @@
 use crate::{
-    vm::{call_frame::EnvStackEntry, opcode::Operation, CompletionType},
+    vm::{call_frame::TryStackEntry, opcode::Operation, CompletionType},
     Context, JsResult,
 };
 
@@ -18,22 +18,13 @@ impl Operation for TryStart {
         let catch = context.vm.read::<u32>();
         let finally = context.vm.read::<u32>();
 
-        // If a finally exists, push the env to the stack before the try.
-        if finally != u32::MAX {
-            context.vm.frame_mut().env_stack.push(
-                EnvStackEntry::default()
-                    .with_finally_flag()
-                    .with_start_address(finally),
-            );
-        }
-
         let fp = context.vm.stack.len() as u32;
-
+        let env_fp = context.vm.environments.len() as u32;
         context
             .vm
             .frame_mut()
-            .env_stack
-            .push(EnvStackEntry::new(catch, finally).with_try_flag(fp));
+            .try_stack
+            .push(TryStackEntry::new(catch, finally, fp, env_fp));
 
         Ok(CompletionType::Normal)
     }
@@ -51,17 +42,12 @@ impl Operation for TryEnd {
     const INSTRUCTION: &'static str = "INST - TryEnd";
 
     fn execute(context: &mut Context<'_>) -> JsResult<CompletionType> {
-        let mut envs_to_pop = 0_usize;
-        while let Some(env_entry) = context.vm.frame_mut().env_stack.pop() {
-            envs_to_pop += env_entry.env_num();
-
-            if env_entry.is_try_env() {
-                break;
-            }
-        }
-
-        let env_truncation_len = context.vm.environments.len().saturating_sub(envs_to_pop);
-        context.vm.environments.truncate(env_truncation_len);
+        context
+            .vm
+            .frame_mut()
+            .try_stack
+            .pop()
+            .expect("There should be a try entry");
 
         Ok(CompletionType::Normal)
     }

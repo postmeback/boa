@@ -1,73 +1,54 @@
-use crate::{
-    bytecompiler::{ByteCompiler, JumpControlInfo},
-    vm::Opcode,
-};
+use crate::{bytecompiler::ByteCompiler, vm::Opcode};
 use boa_ast::statement::Break;
-use boa_interner::Sym;
 
 impl ByteCompiler<'_, '_> {
     /// Compile a [`Break`] `boa_ast` node
     pub(crate) fn compile_break(&mut self, node: Break, _use_expr: bool) {
-        if let Some(info) = self.jump_info.last().filter(|info| info.is_try_block()) {
-            let has_finally_or_is_finally = info.has_finally() || info.in_finally();
+        let target_jump_info_index = self.break_jump_info_target_index(node);
 
-            let (break_label, target_jump_label) =
-                self.emit_opcode_with_two_operands(Opcode::Break);
-
-            if let Some(node_label) = node.label() {
-                let info = self.jump_info_label(node_label);
-                info.push_break_label(target_jump_label);
-
-                if !has_finally_or_is_finally {
-                    info.push_break_label(break_label);
-                    return;
-                }
-            } else {
-                self.jump_info
-                    .last_mut()
-                    .expect("jump_info must exist to reach this point")
-                    .push_set_jumps(target_jump_label);
+        for i in (target_jump_info_index..self.jump_info.len()).rev() {
+            let count = self.jump_info_open_environment_count(i);
+            for _ in 0..count {
+                self.emit_opcode(Opcode::PopEnvironment);
             }
 
-            let info = self
-                .jump_info
-                .last_mut()
-                .expect("This try block must exist");
+            let info = &mut self.jump_info[i];
+            if info.is_try_block() && info.has_finally() {
+                let next_index = info.jumps.len();
 
-            info.push_break_label(break_label);
+                self.emit_push_integer(next_index as i32 + 1);
+                self.emit_opcode(Opcode::PushFalse);
+                let break_label = self.emit_opcode_with_operand(Opcode::Break);
 
-            return;
+                let info = &mut self.jump_info[i];
+                info.push_break_label(node.label(), break_label, Some(target_jump_info_index));
+                break;
+            }
+
+            if i == target_jump_info_index {
+                let break_label = self.emit_opcode_with_operand(Opcode::Break);
+                let info = &mut self.jump_info[i];
+                info.push_break_label(node.label(), break_label, None);
+                break;
+            }
         }
+    }
 
-        // Emit the break opcode -> (Label, Label)
-        let (break_label, target_label) = self.emit_opcode_with_two_operands(Opcode::Break);
+    fn break_jump_info_target_index(&self, node: Break) -> usize {
         if let Some(label) = node.label() {
-            let info = self.jump_info_label(label);
-            info.push_break_label(break_label);
-            info.push_break_label(target_label);
-            return;
-        }
-
-        let info = self.jump_info_non_labelled();
-        info.push_break_label(break_label);
-        info.push_break_label(target_label);
-    }
-
-    fn jump_info_non_labelled(&mut self) -> &mut JumpControlInfo {
-        for info in self.jump_info.iter_mut().rev() {
-            if !info.is_labelled() {
-                return info;
+            for (i, info) in self.jump_info.iter().enumerate().rev() {
+                if info.label() == Some(label) {
+                    return i;
+                }
+            }
+        } else {
+            for (i, info) in self.jump_info.iter().enumerate().rev() {
+                if info.is_loop() || info.is_switch() {
+                    return i;
+                }
             }
         }
-        panic!("Jump info without label must exist");
-    }
 
-    fn jump_info_label(&mut self, label: Sym) -> &mut JumpControlInfo {
-        for info in self.jump_info.iter_mut().rev() {
-            if info.label() == Some(label) {
-                return info;
-            }
-        }
-        panic!("Jump info with label must exist");
+        unreachable!("There should be a valid break jump target")
     }
 }
