@@ -315,8 +315,6 @@ impl CodeBlock {
             | Opcode::JumpIfFalse
             | Opcode::JumpIfNotUndefined
             | Opcode::JumpIfNullOrUndefined
-            | Opcode::FinallyStart
-            | Opcode::LabelledStart
             | Opcode::Case
             | Opcode::Default
             | Opcode::LogicalAnd
@@ -345,11 +343,6 @@ impl CodeBlock {
                 let operand2 = self.read::<u32>(*pc);
                 *pc += size_of::<u32>();
                 format!("{operand1}, {operand2}")
-            }
-            Opcode::Break | Opcode::Continue => {
-                let operand = self.read::<u32>(*pc);
-                *pc += size_of::<u32>();
-                format!("{operand}")
             }
             Opcode::TemplateLookup | Opcode::TemplateCreate => {
                 let operand1 = self.read::<u32>(*pc);
@@ -535,11 +528,9 @@ impl CodeBlock {
             | Opcode::Super
             | Opcode::Return
             | Opcode::PopEnvironment
-            | Opcode::LoopEnd
             | Opcode::LoopContinue
             | Opcode::LoopStart
             | Opcode::IteratorLoopStart
-            | Opcode::LabelledEnd
             | Opcode::CreateForInIterator
             | Opcode::GetIterator
             | Opcode::GetAsyncIterator
@@ -637,7 +628,13 @@ impl CodeBlock {
             | Opcode::Reserved51
             | Opcode::Reserved52
             | Opcode::Reserved53
-            | Opcode::Reserved54 => unreachable!("Reserved opcodes are unrechable"),
+            | Opcode::Reserved54
+            | Opcode::Reserved55
+            | Opcode::Reserved56
+            | Opcode::Reserved57
+            | Opcode::Reserved58
+            | Opcode::Reserved59
+            | Opcode::Reserved60 => unreachable!("Reserved opcodes are unrechable"),
         }
     }
 }

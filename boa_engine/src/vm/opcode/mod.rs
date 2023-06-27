@@ -1166,27 +1166,6 @@ generate_impl! {
         /// Stack: **=>**
         TryEnd,
 
-        /// Start of a finally block.
-        ///
-        /// Operands:
-        ///
-        /// Stack: **=>**
-        FinallyStart,
-
-        /// Unconditional Jump
-        ///
-        /// Operands: Jump Address: u32
-        ///
-        /// Stack: **=>**
-        Break,
-
-        /// Unconditional Jump
-        ///
-        /// Operands: Jump Address: u32
-        ///
-        /// Stack: **=>**
-        Continue,
-
         /// Pops value converts it to boolean and pushes it back.
         ///
         /// Operands:
@@ -1402,27 +1381,6 @@ generate_impl! {
         ///
         /// Stack: **=>**
         LoopContinue,
-
-        /// Clean up environments at the end of a loop and return it's value.
-        ///
-        /// Operands:
-        ///
-        /// Stack: **=>** value
-        LoopEnd,
-
-        /// Push labelled start marker.
-        ///
-        /// Operands: Exit Address: u32,
-        ///
-        /// Stack: **=>**
-        LabelledStart,
-
-        /// Clean up environments at the end of a labelled block.
-        ///
-        /// Operands:
-        ///
-        /// Stack: **=>**
-        LabelledEnd,
 
         /// Creates the ForInIterator of an object.
         ///
@@ -1802,6 +1760,18 @@ generate_impl! {
         Reserved53 => Reserved,
         /// Reserved [`Opcode`].
         Reserved54 => Reserved,
+        /// Reserved [`Opcode`].
+        Reserved55 => Reserved,
+        /// Reserved [`Opcode`].
+        Reserved56 => Reserved,
+        /// Reserved [`Opcode`].
+        Reserved57 => Reserved,
+        /// Reserved [`Opcode`].
+        Reserved58 => Reserved,
+        /// Reserved [`Opcode`].
+        Reserved59 => Reserved,
+        /// Reserved [`Opcode`].
+        Reserved60 => Reserved,
     }
 }
 

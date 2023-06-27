@@ -51,7 +51,6 @@ impl ByteCompiler<'_, '_> {
         }
 
         self.pop_switch_control_info();
-        self.emit_opcode(Opcode::LoopEnd);
 
         let env_index = self.pop_compile_environment();
         self.patch_jump_with_target(push_env, env_index);

@@ -1,5 +1,5 @@
 use crate::{
-    bytecompiler::{jump_control::JumpControlInfoFlags, ByteCompiler, Label},
+    bytecompiler::{jump_control::JumpControlInfoFlags, ByteCompiler},
     vm::{BindingOpcode, Opcode},
 };
 use boa_ast::{
@@ -25,6 +25,7 @@ impl ByteCompiler<'_, '_> {
 
         self.emit_opcode(Opcode::TryEnd);
 
+        // TODO: simplify when there is finally but no catch.
         if has_finally {
             self.emit_opcode(Opcode::PushZero);
             if has_catch {
@@ -50,7 +51,6 @@ impl ByteCompiler<'_, '_> {
             // Pop and push control loops post FinallyStart, as FinallyStart resets flow control variables.
             // Handle finally header operations
             let finally_start = self.next_opcode_location();
-            let finally_end = self.emit_opcode_with_operand(Opcode::FinallyStart);
 
             self.jump_info
                 .last_mut()
@@ -58,7 +58,7 @@ impl ByteCompiler<'_, '_> {
                 .flags |= JumpControlInfoFlags::IN_FINALLY;
             self.patch_jump_with_target(finally_loc, finally_start);
             // Compile finally statement body
-            self.compile_finally_stmt(finally, finally_end, has_catch);
+            self.compile_finally_stmt(finally, has_catch);
 
             self.pop_try_control_info(finally_start);
         } else {
@@ -103,12 +103,7 @@ impl ByteCompiler<'_, '_> {
         }
     }
 
-    pub(crate) fn compile_finally_stmt(
-        &mut self,
-        finally: &Finally,
-        finally_end_label: Label,
-        has_catch: bool,
-    ) {
+    pub(crate) fn compile_finally_stmt(&mut self, finally: &Finally, has_catch: bool) {
         // TODO: We could probably remove the Get/SetReturnValue if we check that there is no break/continues statements.
         self.emit_opcode(Opcode::GetReturnValue);
         self.compile_block(finally.block(), true);
@@ -122,7 +117,5 @@ impl ByteCompiler<'_, '_> {
         // Rethrow error if error happend!
         self.emit_opcode(Opcode::ReThrow);
         self.patch_jump(has_throw_exit);
-
-        self.patch_jump(finally_end_label);
     }
 }

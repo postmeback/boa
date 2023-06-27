@@ -104,7 +104,6 @@ impl ByteCompiler<'_, '_> {
         if env_labels.is_some() {
             self.emit_opcode(Opcode::PopEnvironment);
         }
-        self.emit_opcode(Opcode::LoopEnd);
 
         if let Some(env_labels) = env_labels {
             let env_index = self.pop_compile_environment();
@@ -233,7 +232,6 @@ impl ByteCompiler<'_, '_> {
 
         self.patch_jump(exit);
         self.pop_loop_control_info();
-        self.emit_opcode(Opcode::LoopEnd);
 
         self.iterator_close(false);
 
@@ -379,7 +377,6 @@ impl ByteCompiler<'_, '_> {
 
         self.patch_jump(exit);
         self.pop_loop_control_info();
-        self.emit_opcode(Opcode::LoopEnd);
 
         self.iterator_close(for_of_loop.r#await());
     }
@@ -404,7 +401,6 @@ impl ByteCompiler<'_, '_> {
 
         self.patch_jump(exit);
         self.pop_loop_control_info();
-        self.emit_opcode(Opcode::LoopEnd);
     }
 
     pub(crate) fn compile_do_while_loop(
@@ -433,6 +429,5 @@ impl ByteCompiler<'_, '_> {
         self.patch_jump(exit);
 
         self.pop_loop_control_info();
-        self.emit_opcode(Opcode::LoopEnd);
     }
 }
