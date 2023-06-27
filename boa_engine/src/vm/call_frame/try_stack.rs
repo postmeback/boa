@@ -5,7 +5,6 @@
 #[derive(Clone, Debug)]
 pub(crate) struct TryStackEntry {
     catch: u32,
-    finally: u32,
 
     /// The length of the value stack when the try block was entered.
     ///
@@ -18,21 +17,12 @@ pub(crate) struct TryStackEntry {
 
 impl TryStackEntry {
     /// Creates a new [`EnvStackEntry`] with the supplied start addresses.
-    pub(crate) const fn new(catch: u32, finally: u32, fp: u32, env_fp: u32) -> Self {
-        Self {
-            catch,
-            finally,
-            fp,
-            env_fp,
-        }
+    pub(crate) const fn new(catch: u32, fp: u32, env_fp: u32) -> Self {
+        Self { catch, fp, env_fp }
     }
 
     pub(crate) const fn catch(&self) -> u32 {
         self.catch
-    }
-
-    pub(crate) const fn finally(&self) -> u32 {
-        self.finally
     }
 
     pub(crate) const fn fp(&self) -> u32 {

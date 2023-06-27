@@ -16,7 +16,7 @@ impl Operation for TryStart {
 
     fn execute(context: &mut Context<'_>) -> JsResult<CompletionType> {
         let catch = context.vm.read::<u32>();
-        let finally = context.vm.read::<u32>();
+        let _finally = context.vm.read::<u32>();
 
         let fp = context.vm.stack.len() as u32;
         let env_fp = context.vm.environments.len() as u32;
@@ -24,7 +24,7 @@ impl Operation for TryStart {
             .vm
             .frame_mut()
             .try_stack
-            .push(TryStackEntry::new(catch, finally, fp, env_fp));
+            .push(TryStackEntry::new(catch, fp, env_fp));
 
         Ok(CompletionType::Normal)
     }

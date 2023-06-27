@@ -1,5 +1,5 @@
 use crate::{
-    bytecompiler::{ByteCompiler, Label},
+    bytecompiler::{jump_control::JumpControlInfoFlags, ByteCompiler, Label},
     vm::{BindingOpcode, Opcode},
 };
 use boa_ast::{
@@ -40,7 +40,7 @@ impl ByteCompiler<'_, '_> {
         if let Some(catch) = t.catch() {
             self.compile_catch_stmt(catch, has_finally, use_expr);
         } else {
-            self.emit_opcode(Opcode::PushZero);
+            self.emit_opcode(Opcode::Exception);
             self.emit_opcode(Opcode::PushTrue);
         }
 
@@ -52,10 +52,14 @@ impl ByteCompiler<'_, '_> {
             let finally_start = self.next_opcode_location();
             let finally_end = self.emit_opcode_with_operand(Opcode::FinallyStart);
 
-            self.set_jump_control_start_address(finally_start);
+            self.jump_info
+                .last_mut()
+                .expect("there should be a try block")
+                .flags |= JumpControlInfoFlags::IN_FINALLY;
             self.patch_jump_with_target(finally_loc, finally_start);
             // Compile finally statement body
             self.compile_finally_stmt(finally, finally_end, has_catch);
+
             self.pop_try_control_info(finally_start);
         } else {
             let try_end = self.next_opcode_location();
@@ -112,7 +116,7 @@ impl ByteCompiler<'_, '_> {
 
         let has_throw_exit = self.jump_if_false();
         if !has_catch {
-            self.emit_opcode(Opcode::Pop);
+            self.emit_opcode(Opcode::Throw);
         }
 
         // Rethrow error if error happend!

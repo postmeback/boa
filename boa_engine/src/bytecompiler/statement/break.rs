@@ -1,54 +1,73 @@
-use crate::{bytecompiler::ByteCompiler, vm::Opcode};
+use crate::bytecompiler::{
+    jump_control::{JumpRecord, JumpRecordAction, JumpRecordKind},
+    ByteCompiler,
+};
 use boa_ast::statement::Break;
 
 impl ByteCompiler<'_, '_> {
     /// Compile a [`Break`] `boa_ast` node
     pub(crate) fn compile_break(&mut self, node: Break, _use_expr: bool) {
-        let target_jump_info_index = self.break_jump_info_target_index(node);
+        let actions = self.break_jump_record_actions(node);
 
-        for i in (target_jump_info_index..self.jump_info.len()).rev() {
-            let count = self.jump_info_open_environment_count(i);
-            for _ in 0..count {
-                self.emit_opcode(Opcode::PopEnvironment);
-            }
-
-            let info = &mut self.jump_info[i];
-            if info.is_try_block() && info.has_finally() {
-                let next_index = info.jumps.len();
-
-                self.emit_push_integer(next_index as i32 + 1);
-                self.emit_opcode(Opcode::PushFalse);
-                let break_label = self.emit_opcode_with_operand(Opcode::Break);
-
-                let info = &mut self.jump_info[i];
-                info.push_break_label(node.label(), break_label, Some(target_jump_info_index));
-                break;
-            }
-
-            if i == target_jump_info_index {
-                let break_label = self.emit_opcode_with_operand(Opcode::Break);
-                let info = &mut self.jump_info[i];
-                info.push_break_label(node.label(), break_label, None);
-                break;
-            }
-        }
+        JumpRecord::new(JumpRecordKind::Break, Self::DUMMY_LABEL, actions)
+            .perform_actions(u32::MAX, self);
     }
 
-    fn break_jump_info_target_index(&self, node: Break) -> usize {
+    fn break_jump_record_actions(&self, node: Break) -> Vec<JumpRecordAction> {
+        let mut actions = Vec::default();
+
         if let Some(label) = node.label() {
             for (i, info) in self.jump_info.iter().enumerate().rev() {
+                let count = self.jump_info_open_environment_count(i);
+                actions.push(JumpRecordAction::PopEnvironments { count });
+
+                if info.is_try_block() && info.has_finally() && !info.in_finally() {
+                    let next_index = info.jumps.len();
+
+                    actions.push(JumpRecordAction::HandleFinally {
+                        value: next_index as i32 + 1,
+                    });
+                    actions.push(JumpRecordAction::CreateJump);
+                    actions.push(JumpRecordAction::Transfter { index: i as u32 });
+                }
+
                 if info.label() == Some(label) {
-                    return i;
+                    actions.push(JumpRecordAction::CreateJump);
+                    actions.push(JumpRecordAction::Transfter { index: i as u32 });
+                    break;
+                }
+
+                if info.iterator_loop() {
+                    actions.push(JumpRecordAction::CloseIterator {
+                        r#async: info.for_await_of_loop(),
+                    });
                 }
             }
         } else {
             for (i, info) in self.jump_info.iter().enumerate().rev() {
+                let count = self.jump_info_open_environment_count(i);
+                actions.push(JumpRecordAction::PopEnvironments { count });
+
+                if info.is_try_block() && info.has_finally() && !info.in_finally() {
+                    let next_index = info.jumps.len();
+
+                    actions.push(JumpRecordAction::HandleFinally {
+                        value: next_index as i32 + 1,
+                    });
+                    actions.push(JumpRecordAction::CreateJump);
+                    actions.push(JumpRecordAction::Transfter { index: i as u32 });
+                }
+
                 if info.is_loop() || info.is_switch() {
-                    return i;
+                    actions.push(JumpRecordAction::CreateJump);
+                    actions.push(JumpRecordAction::Transfter { index: i as u32 });
+                    break;
                 }
             }
         }
 
-        unreachable!("There should be a valid break jump target")
+        actions.reverse();
+
+        actions
     }
 }

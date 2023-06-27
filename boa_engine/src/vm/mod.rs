@@ -312,7 +312,7 @@ impl Context<'_> {
                         }
                     }
 
-                    self.vm.err = Some(err.clone());
+                    self.vm.err = Some(err);
 
                     let evaluation = Opcode::ReThrow
                         .execute(self)
