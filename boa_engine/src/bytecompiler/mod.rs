@@ -251,6 +251,8 @@ pub struct ByteCompiler<'ctx, 'host> {
 
     pub(crate) current_open_environments_count: u32,
 
+    pub(crate) returns_to_patch: Vec<Label>,
+
     pub(crate) code_block_flags: CodeBlockFlags,
 
     literals_map: FxHashMap<Literal, u32>,
@@ -296,6 +298,7 @@ impl<'ctx, 'host> ByteCompiler<'ctx, 'host> {
             params: FormalParameterList::default(),
             compile_environments: Vec::default(),
             current_open_environments_count: 0,
+            returns_to_patch: Vec::default(),
             code_block_flags,
 
             literals_map: FxHashMap::default(),

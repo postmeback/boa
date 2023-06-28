@@ -29,6 +29,7 @@ pub(crate) enum JumpRecordAction {
 pub(crate) enum JumpRecordKind {
     Break,
     Continue,
+    Return,
 }
 
 #[derive(Debug, Clone)]
@@ -83,6 +84,7 @@ impl JumpRecord {
         match self.kind {
             JumpRecordKind::Break => compiler.patch_jump(self.label),
             JumpRecordKind::Continue => compiler.patch_jump_with_target(self.label, start_address),
+            JumpRecordKind::Return => compiler.returns_to_patch.push(self.label),
         }
     }
 }
@@ -463,10 +465,10 @@ impl ByteCompiler<'_, '_> {
 
             self.patch_jump(default);
         } else {
-            assert!(
-                info.jumps.is_empty(),
-                "there shouldn't be any breaks or continues attched on a try block without finally"
-            )
+            for jump in info.jumps {
+                // NOTE: There shouldn't be any breaks or continues attched on a try block without finally
+                assert_eq!(jump.kind, JumpRecordKind::Return);
+            }
         }
     }
 
